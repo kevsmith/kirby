@@ -1,0 +1,3 @@
+-define(SEG_MAGIC, 16#facade).
+-define(SEGMENT_PREFIX, "seg.").
+-define(SEG_VERSION, 1).

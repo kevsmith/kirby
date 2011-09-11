@@ -1,0 +1,12 @@
+{application, kirby,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]},
+  {mod, { kirby_app, []}},
+  {env, []}
+ ]}.
