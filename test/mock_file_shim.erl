@@ -4,7 +4,7 @@
 
 -define(FILE_OPS, [open, write, position,
                    truncate, sync, datasync,
-                   close, delete]).
+                   close, delete, pread]).
 
 -define(POSIX_ERRORS, [eacces, eagain, ebadf, ebusy, edquot, eexist, efault,
                       efbig, eintr, einval, eio, eisdir, eloop, emfile, emlink,
@@ -67,6 +67,8 @@ mock_fun(open, no_seg_lock) ->
                            lock ->
                                {error, eexists}
                        end end;
+mock_fun(pread, ebadf) ->
+    fun(_Fd, _Pos, _Length) -> {error, ebadf} end;
 mock_fun(sync, _) ->
     fun({_, Fd}) -> file:sync(Fd) end;
 mock_fun(datasync, _) ->
@@ -82,7 +84,10 @@ mock_fun(truncate, _) ->
 mock_fun(open, _) ->
     fun(Path, Opts) -> open_path(Path, Opts) end;
 mock_fun(delete, _) ->
-    fun(Path) -> file:delete(Path) end.
+    fun(Path) -> file:delete(Path) end;
+mock_fun(pread, _) ->
+    fun({seg, Fd}, Pos, Length) -> file:pread(Fd, Pos, Length) end.
+
 
 open_path(Path, Opts) ->
     case file:open(Path, Opts) of

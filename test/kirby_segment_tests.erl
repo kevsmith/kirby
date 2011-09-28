@@ -18,6 +18,13 @@ seg_write_setup(Error) ->
     {ok, Seg} = kirby_segment:open_for_write(?BLOB_PATH),
     Seg.
 
+seg_read_setup(Error) ->
+    reset_dir(?BLOB_PATH),
+    mock_file_shim:init(Error),
+    {ok, SegW} = kirby_segment:open_for_write(?BLOB_PATH),
+    {ok, SegR} = kirby_segment:open_for_read(?BLOB_PATH, 1),
+    {SegW, SegR}.
+
 teardown(_, _) ->
     meck:unload().
 
@@ -82,3 +89,31 @@ successful_write_test_() ->
                        {ok, Seg1} = kirby_segment:open_for_write(?BLOB_PATH),
                        {ok, _S, _Sz} = kirby_segment:write(Seg1, <<"test">>),
                        ?assertMatch(ok, kirby_segment:close(Seg1)) end end}]}.
+
+open_for_read_failure_test_() ->
+    {foreachx, fun noseg_setup/1, fun teardown/2,
+     [{bad_blob_open,
+       fun(_, _) ->
+               [?_assertMatch({error, enoent}, kirby_segment:open_for_read(?BLOB_PATH, 1))] end}]}.
+
+bad_read_test_() ->
+    {foreachx, fun seg_read_setup/1, fun teardown/2,
+     [{ebadf,
+      fun(_, {SegW, SegR}) ->
+              fun() ->
+                      {ok, S, Sz} = kirby_segment:write(SegW, <<"test">>),
+                      ?assertMatch({error, ebadf}, kirby_segment:read(SegR, S, Sz)) end end},
+      {success,
+       fun(_, {SegW, _SegR}) ->
+               fun() ->
+                       {ok, S, Sz} = kirby_segment:write(SegW, <<"test">>),
+                       ?assertMatch({error, write_only}, kirby_segment:read(SegW, S, Sz)) end end}]}.
+
+successful_read_test_() ->
+    {foreachx, fun seg_read_setup/1, fun teardown/2,
+     [{success,
+       fun(_, {SegW, SegR}) ->
+               fun() ->
+                       Data = <<"testing 123">>,
+                       {ok, S, Sz} = kirby_segment:write(SegW, Data),
+                       ?assertMatch({ok, Data}, kirby_segment:read(SegR, S, Sz)) end end}]}.

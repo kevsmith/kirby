@@ -2,14 +2,14 @@
 -module(kirby_segment).
 
 -type ioerr() :: {error, atom()}.
--type fd() :: pid() | {'file_descriptor',atom() | tuple(),_}.
 -type raw_entry() :: <<_:32,_:_*8>>.
--type lock_tries() :: 1..5.
+-type lock_tries() :: 0..5.
 -record(seg, {dir=""       :: string(),
-              lockfd       :: fd() | undefined,
+              lockfd       :: file:fd() | undefined,
               lockpath=""  :: string(),
-              segfd        :: fd() | undefined,
+              segfd        :: file:fd() | undefined,
               segpath=""   :: string()}).
+
 -opaque seg() :: #seg{}.
 
 -export_type([raw_entry/0,
@@ -22,17 +22,14 @@
 -export([open_for_write/1,
          open_for_read/2,
          write/2,
+         read/3,
          close/1]).
--else.
--compile([export_all]).
--endif.
-
--ifndef(TEST).
 -define(WRITE_OPTS, [raw, binary, write, append]).
 -define(READ_OPTS,  [raw, binary, read]).
 -define(LOCK_OPTS,  [raw, binary, exclusive, read, write]).
 -define(LOCK_TRIES, 5).
 -else.
+-compile([export_all]).
 %% Removed the 'raw' option because eunit plays fast
 %% and loose with processes.
 -define(WRITE_OPTS, [binary, write, append]).
@@ -42,15 +39,15 @@
 -endif.
 
 %% @doc Opens a segment for writing
--spec open_for_write(string()) -> {ok, seg()} | ioerr().
+-spec open_for_write(file:filename()) -> {ok, seg()} | ioerr().
 open_for_write(BaseDir) ->
     open_for_write(BaseDir, next_segment(BaseDir), ?LOCK_TRIES).
 
 %% @doc Opens a segment for reading
--spec open_for_read(string(), string() | non_neg_integer()) -> {ok, seg()} | ioerr().
+-spec open_for_read(file:filename(), string() | non_neg_integer()) -> {ok, seg()} | ioerr().
 open_for_read(BaseDir, Idx) when is_integer(Idx) ->
     open_for_read(BaseDir, idx_to_str(Idx));
-open_for_read(BaseDir, Idx) ->
+open_for_read(BaseDir, Idx) when is_list(Idx) ->
     Segment = seg_fname(BaseDir, Idx),
     case ?file:open(Segment, ?READ_OPTS) of
         {ok, Fd} ->
@@ -61,7 +58,7 @@ open_for_read(BaseDir, Idx) ->
 
 %% @doc Closes a segment
 -spec close(seg()) -> ok | ioerr().
-close(#seg{lockfd=undefined, lockpath="", segfd=Fd}) ->
+close(#seg{lockfd=undefined, segfd=Fd}) ->
     ?file:close(Fd);
 close(#seg{lockfd=LockFd, lockpath=LockPath, segfd=Fd, segpath=SegPath}) ->
     case flush(Fd) of
@@ -90,33 +87,59 @@ close(#seg{lockfd=LockFd, lockpath=LockPath, segfd=Fd, segpath=SegPath}) ->
             ok
     end.
 
--spec write(seg(), binary()) -> {ok, non_neg_integer(), non_neg_integer()} | {error, any()}.
-write(#seg{lockfd=undefined}, _Data) ->
+-spec write(seg(), binary()) -> {ok, integer(), non_neg_integer()} | {error, atom()}.
+write(#seg{lockfd=undefined}, Data) when is_binary(Data) ->
     {error, read_only};
-write(#seg{segfd=SegFd, segpath=SegPath}, Data) ->
-    Entry = kirby_format:make_seg_entry(Data),
-    case ?file:position(SegFd, cur) of
-        {ok, Start} ->
-            case ?file:write(SegFd, Entry) of
-                ok ->
-                    case flush(SegFd) of
+write(#seg{segfd=SegFd, segpath=SegPath, lockfd=LockFd}, Data) when LockFd /= undefined,
+                                                                    is_binary(Data) ->
+    case kirby_format:make_seg_entry(Data) of
+        {ok, Entry} ->
+            case ?file:position(SegFd, cur) of
+                {ok, Start} ->
+                    case ?file:write(SegFd, Entry) of
                         ok ->
-                            {ok, Start, size(Entry)};
+                            case flush(SegFd) of
+                                ok ->
+                                    {ok, Start, size(Entry)};
+                                Error ->
+                                    ?WARN("Failed to sync data to disk on segment ~s! (~p)~n", [SegPath, Error]),
+                                    {error, fsync}
+                            end;
                         Error ->
-                            ?WARN("Failed to sync data to disk on segment ~s! (~p)~n", [SegPath, Error]),
-                            {error, fsync}
+                            abort_write(SegPath, Start, SegFd),
+                            Error
                     end;
                 Error ->
-                    abort_write(SegPath, Start, SegFd),
                     Error
             end;
         Error ->
             Error
     end.
 
+-spec read(seg(), non_neg_integer(), non_neg_integer()) -> {ok, binary()} | {error, atom()} | eof.
+read(#seg{segfd=SegFd, lockfd=undefined}, Start, Length) when Start >= 0,
+                                                              Length >= 1 ->
+    case ?file:pread(SegFd, Start, Length) of
+        {ok, Raw} ->
+            case kirby_format:parse_seg_entry(Raw) of
+                {ok, _Checksum, Data} ->
+                    {ok, Data};
+                Error ->
+                    Error
+            end;
+        Error ->
+            Error
+    end;
+read(#seg{}, Start, Length) when is_integer(Start),
+                                 is_integer(Length) ->
+    {error, write_only}.
+
+
+
 %% Internal functions
--spec next_segment(string()) -> string().
-next_segment(BaseDir) ->
+-spec next_segment(file:filename()) -> string().
+next_segment(BaseDir) when is_binary(BaseDir);
+                           is_list(BaseDir) ->
     case filelib:wildcard("segment-*", BaseDir) of
         [] ->
             "01";
@@ -133,13 +156,13 @@ next_segment(BaseDir) ->
             end
     end.
 
--spec idx_to_str(non_neg_integer()) -> string().
+-spec idx_to_str(integer()) -> string().
 idx_to_str(Idx) when Idx < 10 ->
     "0" ++ integer_to_list(Idx);
 idx_to_str(Idx) ->
     integer_to_list(Idx).
 
--spec lock_segment(string(), string()) -> {ok, string(), fd()} | ioerr().
+-spec lock_segment(file:filename(), string()) -> {ok, file:filename(), file:fd()} | ioerr().
 lock_segment(BaseDir, Idx) ->
     LockFile = lock_fname(BaseDir, Idx),
     case ?file:open(LockFile, ?LOCK_OPTS) of
@@ -155,7 +178,7 @@ lock_segment(BaseDir, Idx) ->
             Error
     end.
 
--spec unlock_segment(string(), fd()) -> ok | ioerr().
+-spec unlock_segment(file:filename(), file:fd()) -> ok | ioerr().
 unlock_segment(LockFile, Fd) ->
     case ?file:close(Fd) of
         ok ->
@@ -164,12 +187,12 @@ unlock_segment(LockFile, Fd) ->
             Error
     end.
 
--spec is_locked(string(), string()) -> boolean().
+-spec is_locked(file:filename(), string()) -> boolean().
 is_locked(BaseDir, Idx) ->
     LockFile = lock_fname(BaseDir, Idx),
     filelib:is_dir(LockFile) orelse filelib:is_file(LockFile).
 
--spec open_for_write(string(), string(), lock_tries()) -> {ok, seg()} | ioerr().
+-spec open_for_write(file:filename(), string(), lock_tries()) -> {ok, seg()} | ioerr().
 open_for_write(_BaseDir, _Idx, 0) ->
     {error, lock_failed};
 open_for_write(BaseDir, Idx, Tries) ->
@@ -214,10 +237,10 @@ abort_write(SegPath, Offset, Fd) ->
             Error
     end.
 
--spec lock_fname(string(), string()) -> file:filename().
+-spec lock_fname(file:filename(), string()) -> file:filename().
 lock_fname(BaseDir, Idx) ->
     filename:join([BaseDir, "lock-" ++ Idx]).
 
--spec seg_fname(string(), string()) -> file:filename().
+-spec seg_fname(file:filename(), string()) -> file:filename().
 seg_fname(BaseDir, Idx) ->
     filename:join([BaseDir, "segment-" ++ Idx]).
