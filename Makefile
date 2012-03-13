@@ -1,4 +1,5 @@
-DEPS = deps/automeck deps/meck
+#DEPS = deps/automeck deps/meck
+DEPS = deps/eleveldb deps/gproc
 
 all: dialyzer eunit
 
